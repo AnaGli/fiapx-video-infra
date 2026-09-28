@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 cd "$(dirname "$0")"
 
@@ -9,30 +9,63 @@ if [ ! -f .env ]; then
 fi
 
 get_env() {
-  grep "^$1=" .env | cut -d '=' -f2-
+  grep "^$1=" .env | head -n1 | cut -d '=' -f2- | tr -d '\r'
 }
 
-echo "Aplicando namespace..."
+REQUIRED_VARS=(
+  RABBITMQ_DEFAULT_USER
+  RABBITMQ_DEFAULT_PASS
+  LOCALSTACK_AUTH_TOKEN
+  WORKER_DB_USER
+  WORKER_DB_PASSWORD
+  API_DB_USER
+  API_DB_PASSWORD
+  DD_API_KEY
+)
+
+for var in "${REQUIRED_VARS[@]}"; do
+  if [ -z "$(get_env "$var" || true)" ]; then
+    echo "Erro: variável $var ausente ou vazia no .env"
+    exit 1
+  fi
+done
+
+apply_secret() {
+  local name=$1 namespace=$2
+  shift 2
+  kubectl create secret generic "$name" -n "$namespace" "$@" \
+    --dry-run=client -o yaml | kubectl apply -f -
+}
+
+echo "Aplicando namespaces..."
 kubectl apply -f k8s/namespace.yaml
+kubectl apply -f k8s/datadog-namespace.yaml
+echo "Instalando Datadog Operator..."
+helm repo add datadog https://helm.datadoghq.com >/dev/null 2>&1 || true
+helm repo update >/dev/null
+helm upgrade --install datadog-operator datadog/datadog-operator -n datadog
+kubectl rollout status deployment/datadog-operator -n datadog --timeout=120s
+
+echo "Aplicando Datadog Agent..."
+kubectl apply -f k8s/datadog-agent.yaml
 
 echo "Criando/atualizando secrets a partir do .env..."
 
-kubectl delete secret rabbitmq-secrets -n video-infra --ignore-not-found
-kubectl create secret generic rabbitmq-secrets -n video-infra \
+apply_secret datadog-secret datadog \
+  --from-literal=api-key="$(get_env DD_API_KEY)"
+
+apply_secret rabbitmq-secrets video-infra \
   --from-literal=RABBITMQ_DEFAULT_USER="$(get_env RABBITMQ_DEFAULT_USER)" \
   --from-literal=RABBITMQ_DEFAULT_PASS="$(get_env RABBITMQ_DEFAULT_PASS)"
 
-kubectl delete secret localstack-secrets -n video-infra --ignore-not-found
-kubectl create secret generic localstack-secrets -n video-infra \
+apply_secret localstack-secrets video-infra \
   --from-literal=LOCALSTACK_AUTH_TOKEN="$(get_env LOCALSTACK_AUTH_TOKEN)"
 
-kubectl delete secret video-worker-db-secrets -n video-infra --ignore-not-found
-kubectl create secret generic video-worker-db-secrets -n video-infra \
+apply_secret video-worker-db-secrets video-infra \
   --from-literal=POSTGRES_USER="$(get_env WORKER_DB_USER)" \
   --from-literal=POSTGRES_PASSWORD="$(get_env WORKER_DB_PASSWORD)"
 
-kubectl delete secret video-api-db-secrets -n video-infra --ignore-not-found
-kubectl create secret generic video-api-db-secrets -n video-infra \
+apply_secret video-api-db-secrets video-infra \
   --from-literal=POSTGRES_USER="$(get_env API_DB_USER)" \
   --from-literal=POSTGRES_PASSWORD="$(get_env API_DB_PASSWORD)"
 
@@ -49,10 +82,9 @@ echo "Aplicando banco de dados da API..."
 kubectl apply -f k8s/video-api-db.yaml
 
 echo "Aguardando tudo ficar pronto..."
-kubectl wait --for=condition=ready pod -l app=rabbitmq -n video-infra --timeout=90s
-kubectl wait --for=condition=ready pod -l app=localstack -n video-infra --timeout=90s
-kubectl wait --for=condition=ready pod -l app=video-worker-db -n video-infra --timeout=90s
-kubectl wait --for=condition=ready pod -l app=video-api-db -n video-infra --timeout=90s
+for deployment in rabbitmq localstack video-worker-db video-api-db; do
+  kubectl rollout status deployment/"$deployment" -n video-infra --timeout=90s
+done
 
 echo ""
 echo "Infraestrutura pronta. Endpoints internos para os microsserviços:"
