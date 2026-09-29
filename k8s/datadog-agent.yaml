@@ -1,0 +1,38 @@
+apiVersion: datadoghq.com/v2alpha1
+kind: DatadogAgent
+metadata:
+  name: datadog
+  namespace: datadog
+spec:
+  global:
+    clusterName: docker-desktop-fiapx
+    site: datadoghq.com            # ajuste se sua conta for de outra região
+    credentials:
+      apiSecret:
+        secretName: datadog-secret
+        keyName: api-key
+    kubelet:
+      tlsVerify: false             # mesmo problema de certificado do metrics-server no Docker Desktop
+
+  features:
+    logCollection:
+      enabled: true
+      containerCollectAll: true    # coleta logs de todos os containers, sem mudar as apps
+    apm:
+      enabled: true
+    kubeStateMetricsCore:
+      enabled: true                # métricas de Deployment, HPA, Job, etc.
+    liveContainerCollection:
+      enabled: true
+
+  override:
+    nodeAgent:
+      containers:
+        agent:
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
