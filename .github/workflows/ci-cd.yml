@@ -1,0 +1,61 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: ["*"]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: app-repo
+  IMAGE_TAG: latest
+
+jobs:
+
+  deploy-eks:
+    name: Deploy to EKS
+    needs: build-docker
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+      - name: Update Kube Config
+        run: |
+          aws eks update-kubeconfig \
+          --name EKS-FIAP \
+          --region us-east-1
+
+      - name: Create or Update Kubernetes Secret
+        run: |
+          kubectl create secret generic fastapi-secrets \
+            --from-literal=POSTGRES_USER="${{ secrets.DB_USER }}" \
+            --from-literal=POSTGRES_PASSWORD="${{ secrets.DB_PASSWORD }}" \
+            --from-literal=DATABASE_URL="postgresql://${{ secrets.DB_USER }}:${{ secrets.DB_PASSWORD }}@${{ secrets.DB_HOST }}:5432/${{ secrets.DB_NAME }}" \
+            --from-literal=SECRET_KEY="${{ secrets.SECRET_KEY }}" \
+            --from-literal=ALGORITHM="HS256" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply Kubernetes Manifests
+        run: |
+          kubectl apply -f k8s/metrics.yaml
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/configmap.yaml
+          kubectl apply -f k8s/hpa.yaml
+
+      - name: Restart Deployment
+        run: |
+          kubectl rollout restart deployment fastapi-app
+
+      - name: Wait Rollout
+        run: |
+          kubectl rollout status deployment fastapi-app
